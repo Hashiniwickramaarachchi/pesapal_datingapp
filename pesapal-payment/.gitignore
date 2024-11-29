@@ -1,0 +1,40 @@
+# Node.js dependencies
+/node_modules
+/npm-debug.log
+/yarn-error.log
+
+# Environment variables
+.env
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Editor-specific files
+.vscode/
+.idea/
+*.swp
+
+# Build output
+/dist/
+.build/
+
+# Firebase credentials
+firebase-debug.log
+firebase-debug.*.log
+
+# Miscellaneous
+*.bak
+*.tmp
+*.pid
+*.seed
+
+# Ignore sensitive data
+credentials.json
