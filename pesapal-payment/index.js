@@ -1,126 +1,155 @@
-require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
-const { addDoc, collection } = require('firebase/firestore');
-const { db } = require('./firebase'); 
+const bodyParser = require('body-parser');
 const app = express();
-const port = process.env.PORT || 3000;
+const { db } = require('./firebase');
+const { addDoc, collection } = require('firebase/firestore');
 
-app.use(express.json()); 
+app.use(bodyParser.json());
 
-// Helper function to make a POST request
-const makePostRequest = async (url, data, headers) => {
-    try {
-        const response = await axios.post(url, data, { headers });
-        return response.data;
-    } catch (error) {
-        console.error("Error in POST request:", error.response?.data || error.message);
-        return null;
-    }
-};
+const APP_ENVIRONMENT = 'sandbox'; 
 
-// Helper function to save payment data to Firestore
-const savePaymentData = async (paymentData) => {
-    try {
-        if (paymentData && paymentData.email && paymentData.status && paymentData.order_id) {
-            const docRef = await addDoc(collection(db, "payments"), paymentData);
-            console.log("Document written with ID: ", docRef.id);
-        } else {
-            console.error("Missing required fields for saving payment data:", paymentData);
-        }
-    } catch (e) {
-        console.error("Error adding document: ", e);
-    }
-};
+// Helper function to get Access Token
+const getAccessToken = async () => {
+  try {
+    const apiUrl = APP_ENVIRONMENT === 'sandbox'
+      ? 'https://cybqa.pesapal.com/pesapalv3/api/Auth/RequestToken'
+      : 'https://pay.pesapal.com/v3/api/Auth/RequestToken';
 
-// Endpoint to start the payment process
-app.post('/process-payment', async (req, res) => {
-    const { orderData, ipnData } = req.body; 
-
-    if (!orderData || !ipnData) {
-        return res.status(400).json({ message: 'Missing required payment data.' });
-    }
-
-    const authData = {
-        consumer_key: process.env.PESAPAL_CONSUMER_KEY,
-        consumer_secret: process.env.PESAPAL_CONSUMER_SECRET,
-    };
-    const authHeaders = {
-        'Content-Type': 'application/json',
+    const response = await axios.post(apiUrl, {
+      consumer_key: 'qkio1BGGYAXTu2JOfm7XSXNruoZsrqEW',
+      consumer_secret: 'osGQ364R49cXKeOYSpaOnT++rHs='
+    }, {
+      headers: {
         'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      }
+    });
+
+    return response.data.token;
+  } catch (error) {
+    console.error('Error getting access token:', error);
+    throw error;
+  }
+};
+
+// Helper function to register IPN
+const registerIPN = async (token) => {
+  try {
+    const ipnRegistrationUrl = APP_ENVIRONMENT === 'sandbox'
+      ? 'https://cybqa.pesapal.com/pesapalv3/api/URLSetup/RegisterIPN'
+      : 'https://pay.pesapal.com/v3/api/URLSetup/RegisterIPN';
+
+    const response = await axios.post(ipnRegistrationUrl, {
+      url: 'https://1f5dccdf-6580-4ed7-b135-89e5b7a31fdd.mock.pstmn.io/pin',
+      ipn_notification_type: 'POST'
+    }, {
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    return response.data.ipn_id;
+  } catch (error) {
+    console.error('Error registering IPN:', error);
+    throw error;
+  }
+};
+
+// Helper function to submit order
+const submitOrderRequest = async (token, orderDetails) => {
+  try {
+    const submitOrderUrl = APP_ENVIRONMENT === 'sandbox'
+      ? 'https://cybqa.pesapal.com/pesapalv3/api/Transactions/SubmitOrderRequest'
+      : 'https://pay.pesapal.com/v3/api/Transactions/SubmitOrderRequest';
+
+    const response = await axios.post(submitOrderUrl, orderDetails, {
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    return response.data;
+  } catch (error) {
+    console.error('Error submitting order:', error);
+    throw error;
+  }
+};
+
+// Save payment data to Firestore
+const savePaymentData = async (paymentData) => {
+  try {
+    const docRef = await addDoc(collection(db, 'payments'), paymentData);
+    console.log('Payment data saved successfully with ID:', docRef.id);
+    return docRef.id; 
+  } catch (error) {
+    console.error('Error saving payment data:', error);
+    throw error;
+  }
+};
+
+// API to handle the full process
+app.post('/submit-order', async (req, res) => {
+  try {
+    const { amount, phone, first_name, middle_name, last_name, email_address, description, branch, callback_url } = req.body;
+
+    // Step 1: Get access token
+    const token = await getAccessToken();
+
+    // Step 2: Register IPN
+    const ipn_id = await registerIPN(token);
+
+    // Step 3: Submit order
+    const merchant_reference = Math.floor(Math.random() * 1000000000000000000);
+    const orderDetails = {
+      id: merchant_reference.toString(),
+      currency: 'UGX',
+      amount,
+      description,
+      callback_url,
+      notification_id: ipn_id,
+      branch,
+      billing_address: {
+        email_address,
+        phone_number: phone,
+        country_code: 'UG',
+        first_name,
+        middle_name,
+        last_name
+      }
     };
 
-    try {
-        // 1. Send the auth request to get the token
-        const authResponse = await makePostRequest(
-            'https://cybqa.pesapal.com/pesapalv3/api/Auth/RequestToken',
-            authData,
-            authHeaders
-        );
+    const orderResponse = await submitOrderRequest(token, orderDetails);
 
-        if (authResponse && authResponse.token) {
-            const token = authResponse.token;
+    // Save payment data to Firestore
+    const paymentData = {
+      order_tracking_id: orderResponse.order_tracking_id || null,
+      merchant_reference: orderResponse.merchant_reference || null,
+      amount,
+      phone,
+      first_name,
+      middle_name,
+      last_name,
+      email_address,
+      created_at: new Date().toISOString()
+    };
 
-            // 2. Register IPN
-            const ipnHeaders = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'Authorization': `Bearer ${token}`,
-            };
+    await savePaymentData(paymentData);
 
-            await makePostRequest(
-                'https://cybqa.pesapal.com/pesapalv3/api/URLSetup/RegisterIPN',
-                ipnData,
-                ipnHeaders
-            );
-
-            // 3. Submit the order
-            const orderHeaders = {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`,
-            };
-
-            const orderResponse = await makePostRequest(
-                'https://cybqa.pesapal.com/pesapalv3/api/Transactions/SubmitOrderRequest',
-                orderData,
-                orderHeaders
-            );
-
-            if (orderResponse && orderResponse.order_tracking_id && orderResponse.merchant_reference) {
-                const paymentData = {
-                    email: orderData.billing_address.email_address || "No email provided",
-                    status: orderResponse.status || "Unknown",
-                    amount: orderData.amount || 0,
-                    order_id: orderData.id || "Unknown",
-                    tracking_id: orderResponse.order_tracking_id || "Unknown",
-                    merchant_reference: orderResponse.merchant_reference || "Unknown",
-                };
-
-                // 4. Save payment data to Firestore
-                await savePaymentData(paymentData);
-
-                // 5. Extract the payment URL from the response (usually found in the order response)
-                const paymentUrl = orderResponse.payment_url || "No payment URL provided";
-
-                // Respond to the mobile app with the payment URL
-                res.status(200).json({
-                    message: 'Payment processed successfully',
-                    paymentUrl: paymentUrl,
-                    paymentData: paymentData,
-                });
-            } else {
-                res.status(500).json({ message: 'Failed to submit order', details: orderResponse });
-            }
-        } else {
-            res.status(500).json({ message: 'Failed to authenticate with Pesapal' });
-        }
-    } catch (error) {
-        console.error("Error processing payment:", error);
-        res.status(500).json({ message: 'Internal server error', error: error.message });
-    }
+    // Send response to the client
+    res.json(orderResponse);
+  } catch (error) {
+    console.error('Error processing order:', error);
+    res.status(500).json({ error: 'An error occurred while processing the order.' });
+  }
 });
 
 // Start the server
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
-});  
+  console.log(`Server is running on port ${port}`);
+});
